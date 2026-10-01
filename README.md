@@ -58,3 +58,7 @@ on the new device. Card content ships with the app and is not part of the backup
 - Template leftovers that are safe to delete: `src/App.css`, `src/assets/`,
   `public/favicon.svg`, `public/icons.svg`. Tailwind is installed but unused
   (styling is plain CSS in `src/index.css`).
+
+## Junior SWE learning course
+
+[Start the detailed Astra upskilling course](astraupskill/README.md): validating persisted state and atomic IndexedDB replacement, with a codebase map, worked implementation, executable examples, debugging labs, exercises and solution discussions.
