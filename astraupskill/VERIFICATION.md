@@ -1,58 +1,33 @@
-# Verification: DevDeck: safe progress restore
+# Verification record and limits
 
 [Course index](README.md)
 
-Verified September 8, 2026 in isolated working copies before application to the original folder.
+## Original delivery (September 8, 2026)
+
+The import-validation change was verified in an isolated working copy before being applied here. Recorded results:
 
 | Check | Result |
 |---|---|
-| build | Passed |
-| tests | Passed |
-| typecheck | Passed |
-| Chromium interaction | Passed |
+| `npm run build` | Passed |
+| `npm test` | Passed |
+| `npm run typecheck` | Passed |
+| Chromium: import a malformed backup through Settings | Rejected through the real import screen |
+| Chromium: 390px viewport | Document width 390px (layout smoke check only) |
 
-Automated test cases: **2 delivered by this change** plus **1** added in the fix pass (settings branch) (`src/importValidation.test.ts`). The inherited DevDeck suite totals 62 cases across 4 files including these two; it was re-run as a regression gate, not authored here.
+The change added the first two tests in `src/importValidation.test.ts`; a later fix pass added the third (settings). It also shortened one bundled card's code snippet to satisfy the existing 12-line content rule. Toolchain: Node 22.16.0. The logs, screenshots and pre-change backups from that run were kept outside this repository and are not available here.
 
-## Tested behavior
+## Course refinement (October 6, 2026)
 
-Export fresh progress, set one card reps to 7 and restore only that state: the card keeps 7 reps and missing cards receive new states. Include one unknown-card log: it is omitted. A negative due value, duplicate state ID, invalid study limit or impossible metadata date rejects before any stored progress changes.
+The course text was rewritten against the code at this commit, and `TESTING.md` and `HANDOFF.md` received dated status corrections. No source or test files were changed.
 
-The course contains additional hand-worked examples and optional exercises. These are not counted as implemented tests.
-
-## Environment and scope
-
-Node 22.16.0 and dependencies installed in the isolated verification workspace were used. The exact dependency versions are recorded with the batch evidence. Floating dependency declarations remain floating; a clean dependency install was not repeated in every original folder.
-
-The built React app was opened in a fresh Chromium browser context. A malformed backup was rejected through its real import screen. Automated tests also exercise nested validation and preservation of existing data.
-
-The browser screenshot was also captured at a 390px viewport. Measured document width: 390px. This is a layout smoke check, not a complete accessibility or device audit.
-
-## Reproduce
-
-From this project root, install its declared dependencies:
-
-```powershell
-npm install
-npm run dev
-```
-
-Open the local Vite URL. This app stores its data in the browser, so no API process or PostgreSQL service is required. Keep using the same origin: changing the hostname or port selects a different browser storage area.
-
-```powershell
-npm test
-npm run build
-```
-
-The existing Vitest suite runs alongside the new import regressions. Use synthetic records and a separate browser profile for practice resets. The test fixtures use fresh simulated storage. A browser check separately verifies the built app in Chromium. Export a copy of learning progress before experimenting with restore behavior.
-
-This app uses Dexie/IndexedDB. validateImport checks the whole payload before importData opens a transaction across progress tables. The tests exercise the actual Dexie methods using fake-indexeddb.
-
-Reading the diff: the files Astra touched were re-saved with CRLF line endings and Prettier formatting, so a plain `diff` shows whole files as changed. Compare with `git diff -w`, or `diff -r --strip-trailing-cr -w <backup> <project>` against the pre-change backup, to see only the real edits.
+- **Paths:** every file linked or cited exists in the repository (scripted check); line citations were spot-checked against the current files.
+- **Test inventory:** a static count of `it(` calls gives 63 tests in 4 files (scheduler 21, queue 9, integration 30, import validation 3). The earlier record above said "62 cases across 4 files"; the source now has 63. The suite was **not** run during this refinement (no `npm install`).
+- **Card inventory:** 265 card ids across 11 deck files in `src/content/`, matching the `ships 265 cards across 11 decks` test.
+- **Validator behaviour** claimed in chapters 2-4 was confirmed by running the unmodified `validateImport` under Node 22's `--experimental-strip-types` against a minimal valid payload with one mutation at a time. Rejections and their messages matched the tables in chapters 3 and 5; the "accepted today" gaps (unknown or empty deck ids, empty card types, `newCardsPerDay` 0 and 5000, `ease` 1.0, `learningStepIndex` 99 on a review card, a streak with no review day, `exportedAt` 0) were all accepted.
+- **Not executed:** the Dexie-level exercise checks (exercises 2-7 need `npm install` for Dexie, Vitest and `fake-indexeddb`). Their expected results were derived from reading `db.ts`, `store.ts` and the existing tests. Exercise 6's outcome rests on Dexie's documented behaviour that a rejected transaction callback aborts the transaction.
 
 ## Limits
 
-The test uses fake-indexeddb to exercise the actual Dexie methods and compares stored state/settings/meta after rejected imports. Chromium is a separate check of actual browser startup and interaction. The existing content QA tests also protect the learning experience: a 15-line nested-conditional example was shortened to fit the existing 12-line rule while retaining the same four input outcomes. This app is a browser persistence study case; it does not contain a server CRUD API.
-
-These are focused learning improvements, not a production-readiness certification. Existing integrations and all optional exercises are outside the checked boundary unless named above.
-
-Delivery hashes and local course links are checked after applying the files. Logs, screenshots, diffs and backups are in AstraOrganized2/astrafinalplan/implementation/batch04. The combined report is AstraOrganized2/astrdocs/ALL_75_PROJECTS_REPORT.md.
+- Exercises are learner work; none is implemented in the repository.
+- The automated tests use `fake-indexeddb`, which models IndexedDB semantics in Node. They do not exercise real browser quotas, private-mode restrictions or service-worker behaviour.
+- This is a focused course on one import boundary, not an audit of the scheduler, queue or content.

@@ -1,62 +1,76 @@
-# Testing and debugging
+# Tests, gaps and debugging
 
 [Course index](README.md)
 
 ## Run the checks
 
-From this project root, install its declared dependencies:
-
 ```powershell
-npm install
-npm run dev
+npm test                                         # all four files
+npx vitest run src/importValidation.test.ts      # just the import tests
+npx vitest run -t "round-trips"                  # tests whose name matches
+npm run test:watch
+npm run typecheck
 ```
 
-Open the local Vite URL. This app stores its data in the browser, so no API process or PostgreSQL service is required. Keep using the same origin: changing the hostname or port selects a different browser storage area.
+Vitest is configured in [vite.config.ts](../vite.config.ts) with `environment: 'node'` and `include: ['src/**/*.test.ts']`. There is no browser and no jsdom: tests that touch Dexie import `fake-indexeddb/auto` first, which installs an in-memory IndexedDB implementation in Node.
 
-```powershell
-npm test
-npm run build
-```
+## What is in the suite
 
-The existing Vitest suite runs alongside the new import regressions. Use synthetic records and a separate browser profile for practice resets. The test fixtures use fresh simulated storage. A browser check separately verifies the built app in Chromium. Export a copy of learning progress before experimenting with restore behavior.
+Static count as of 2026-10-06 (counting `it(` calls; no `it.each` is used):
 
-```text
-npm test
-npm run build
-```
-This app uses Dexie/IndexedDB. validateImport checks the whole payload before importData opens a transaction across progress tables. The tests exercise the actual Dexie methods using fake-indexeddb.
-## What the test suite proves
+| File | Tests | Covers |
+|---|---|---|
+| `src/scheduler.test.ts` | 21 | SM-2 steps, graduation, lapses, ease floor, interval caps, fuzz, previews |
+| `src/queue.test.ts` | 9 | queue ordering, new-card interleaving and caps, filters, day boundary |
+| `src/app.integration.test.ts` | 30 | content QA over all 265 cards, scheduler+queue lifecycles, Dexie seeding/export/import, full store sessions, date helpers |
+| `src/importValidation.test.ts` | 3 | the worked change: malformed payloads change nothing; partial restore |
 
-Read [src/importValidation.test.ts](../src/importValidation.test.ts). The suite targets **validating persisted state and atomic IndexedDB replacement** and uses the worked fixture:
+63 tests in total. [TESTING.md](../TESTING.md) describes each group in more detail.
 
-Export fresh progress, set one card reps to 7 and restore only that state: the card keeps 7 reps and missing cards receive new states. Include one unknown-card log: it is omitted. A negative due value, duplicate state ID, invalid study limit or impossible metadata date rejects before any stored progress changes.
+## What the import tests prove, and what they do not
 
-The expectation should not be copied from the function being tested. Hand-calculate counts, amounts, identities or elapsed time first. Otherwise the same mistake can appear in both implementation and expected result. Tests that exercise only a mocked dependency prove a narrower contract than tests against the real dependency; read the helper to understand which kind you are running.
+They prove, against the real Dexie code:
 
-This project uses Vitest with fake-indexeddb so the tests drive the actual Dexie methods. Browser checks exercise the built client separately. Read the project verification page for the exact observed checks and limits.
+- the listed malformations are rejected and leave states, settings and meta identical;
+- a valid partial restore keeps the restored state, recreates the rest, and drops logs for unknown cards;
+- (in `app.integration.test.ts`) a full export → reset → import cycle restores states, logs and streaks exactly.
 
-## Debugging workflow
+They do not prove:
 
-1. Reproduce the smallest failing case with the exact input saved in your notes.
-2. Inspect the relevant event/request. Confirm the intended handler actually ran.
-3. Pause at `importData` and inspect input types as well as values.
-4. Follow validation branches, noting whether any state or persistence changed before rejection.
-5. Inspect the write result and the subsequent render/response. Separate storage correctness from display correctness.
-6. Add a regression reproducing the failure, make the smallest justified fix, then run the focused suite and relevant broader checks.
+- **which validator block rejected each case** (all assert `/Malformed backup/`);
+- that `reviewLogs` are untouched after a rejected import (not compared);
+- **atomicity under a failure inside the transaction**. Every rejection in the suite happens before the transaction opens. No test makes the callback fail after `clear()` and checks that the old rows survive. Exercise 6 writes that test;
+- anything about `importBackup` in the store: the non-JSON path and the success message are untested.
 
-Avoid changing several layers at once when you do not yet know where the failure starts. A correct backend with a stale UI needs a different fix from a malformed query or an invalid saved document.
+### Gaps the validator accepts today
 
-## Failure experiments
+Each of these was confirmed by calling `validateImport` directly on a minimal valid payload; each is **accepted**:
 
-- Reuse the invalid fixture from the tests and verify no unintended records or fields change.
-- Reload or restart after a successful operation to distinguish persistence from temporary screen state.
-- Repeat the operation and explain whether it should be idempotent, rejected or intentionally create another record.
-- Simulate the relevant timing or storage failure only in a disposable fixture. Restore normal behavior after the experiment.
+| Input | Why | Effect today |
+|---|---|---|
+| `settings.enabledDeckIds: ["no-such-deck"]` | deck ids only checked to be strings | an empty per-deck counter; no visible harm |
+| `settings.enabledDeckIds: []` or `enabledCardTypes: []` | empty arrays pass `every` | sessions have nothing to show until settings are changed |
+| `settings.newCardsPerDay: 0` or `5000` | range 0-10,000 | the UI stepper (1-50) would never produce these |
+| state `ease: 1.0` | range 1-10 | the scheduler's floor is 1.3 |
+| state `status: "review"` with `learningStepIndex: 99` | fields checked independently | ignored by the scheduler for review cards |
+| `meta.streak: 5` with `lastReviewDay: null` | no cross-field check except `bestStreak >= streak` | the next review resets the streak to 1 |
+| `exportedAt: 0` | any finite number ≥ 0 | not used after import |
 
-## Reading an assertion failure
+None of these is a crash. They show that a validator is a set of beliefs about the producer, and that beliefs drift unless tests pin them.
 
-“Expected 3, received 4” is evidence about one observation, not a complete diagnosis. Ask whether the fixture created an extra record, the operation ran twice, an old record survived, or the assertion looked at an unfiltered collection. Start from the state table and trace the first point where the actual value diverges. A stack trace identifies where the program noticed a problem, which may be later than the code that caused it.
+## Debugging a rejected import
 
-## Verification record
+1. **Read the block name.** The message names one of six blocks (schema, review arrays, review state, review log, settings, progress metadata). Use the table in chapter 2 to jump to the right lines of `importValidation.ts`.
+2. **Find the record.** The message does not say which record. Bisect: delete half of the `reviewStates` (or logs) from a copy of the file and import again; repeat until one remains. Then remove fields from that record one by one.
+3. **Check the helper, not just the value.** If a date "looks fine", run `new Date('2025-02-29').toISOString()` in Node. If a number looks fine, check whether it must be an integer.
+4. **Reproduce in a test.** Start from `buildExport()` in a test, apply the one change, and assert the exact message. That is faster and more reliable than clicking through Settings.
 
-The companion [VERIFICATION.md](VERIFICATION.md) records checks actually run for this implementation. Record your own command, date, result and any environmental prerequisite when practicing. A passing test does not imply every route, browser, dependency version or production deployment has been exercised.
+## Debugging an import that "worked" but looks wrong
+
+- Open devtools → Application → IndexedDB → `devdeck`, and read `reviewStates`, `settings` and `meta` directly. That is the source of truth.
+- If storage is right but Home shows unexpected counts, look at `settings.enabledDeckIds` and `enabledCardTypes`: the queue filters on both (`src/queue.ts:49-50`). A backup from before a deck existed will have that deck disabled.
+- If the count in the success message is lower than the number of states in your file, some `cardId`s did not match bundled cards and were filtered out (`db.ts:172`).
+
+## Reading a failing assertion
+
+`expected [ …265 items… ] to deeply equal [ …265 items… ]` after a rejected import means something **was** written. Before reading the diff, check the order in `importData`: is `validateImport` still the first statement? Then check whether the failing mutation actually reached the validator: a mutation that makes `JSON.parse`-level or schema-level checks fail never exercises the block you meant to test.

@@ -1,152 +1,151 @@
-# Solutions and engineering review
+# Solutions and reviewer notes
 
-[Course index](README.md) · [Practice prompts](05-PRACTICE.md)
+[Course index](README.md) · [Exercises](05-PRACTICE.md)
 
-Attempt each exercise before using these notes. These are solution approaches and review criteria, not claims that every extension has been implemented. The actual completed behavior is described in the worked-change chapter.
+Reference approaches, not the only correct answers. None of these changes is applied to the repository.
 
-## Check a solution the same way the course checks its own
+## Exercise 1
 
-Every solution below should survive the same check chapter 03 runs; run it after your change and compare the result to the expected observations in chapter 03:
+```ts
+type Backup = Awaited<ReturnType<typeof buildExport>>;
 
-```typescript
-import "fake-indexeddb/auto";
-import { beforeEach, it, expect } from "vitest";
-import { db, seedAndLoad, buildExport, importData } from "./db";
-beforeEach(async () => {
-  await db.delete();
-  await db.open();
-  await seedAndLoad(Date.now());
-});
-it("rejects malformed nested values and duplicate card IDs before changing any progress", async () => {
+it.each<[string, (p: Backup) => void, string]>([
+  ['a negative due', (p) => { p.reviewStates[0].due = -1; }, 'Malformed backup: review state'],
+  ['a duplicate state', (p) => { p.reviewStates.push({ ...p.reviewStates[0] }); }, 'Malformed backup: review state'],
+  ['a negative new-card limit', (p) => { p.settings.newCardsPerDay = -1; }, 'Malformed backup: settings'],
+  ['an impossible review day', (p) => { p.meta.lastReviewDay = '2025-02-30'; }, 'Malformed backup: progress metadata'],
+])('rejects %s and changes nothing', async (_name, mutate, message) => {
   const original = await buildExport();
-  for (const mutate of [
-    (p: typeof original) => {
-      p.reviewStates[0].due = -1;
-    },
-    (p: typeof original) => {
-      p.reviewStates.push({ ...p.reviewStates[0] });
-    },
-    (p: typeof original) => {
-      p.settings.newCardsPerDay = -1;
-    },
-    (p: typeof original) => {
-      p.meta.lastReviewDay = "2025-02-30";
-    },
-  ]) {
-    const bad = structuredClone(original);
-    mutate(bad);
-    await expect(importData(bad, Date.now())).rejects.toThrow(
-      /Malformed backup/,
-    );
-    const after = await buildExport();
-    expect(after.reviewStates).toEqual(original.reviewStates);
-    expect(after.settings).toEqual(original.settings);
-    expect(after.meta).toEqual(original.meta);
-  }
-});
-it("valid restore keeps progress, omits unknown-card logs, and recreates missing states", async () => {
-  const backup = await buildExport();
-  const kept = backup.reviewStates[0];
-  kept.reps = 7;
-  backup.reviewStates = [kept];
-  backup.reviewLogs = [
-    {
-      cardId: kept.cardId,
-      reviewedAt: Date.now(),
-      grade: 2,
-      msTaken: 100,
-      statusBefore: "new",
-    },
-    {
-      cardId: "removed-card",
-      reviewedAt: Date.now(),
-      grade: 2,
-      msTaken: 100,
-      statusBefore: "new",
-    },
-  ];
-  expect(await importData(backup, Date.now())).toBe(1);
-  expect((await db.reviewStates.get(kept.cardId))?.reps).toBe(7);
-  expect(await db.reviewStates.count()).toBeGreaterThan(1);
-  expect(await db.reviewLogs.count()).toBe(1);
-});
-it("rejects malformed enabled card types or deck ids before changing any progress", async () => {
-  const original = await buildExport();
-  for (const mutate of [
-    (p: typeof original) => {
-      (p.settings as any).enabledCardTypes = ["not-a-type"];
-    },
-    (p: typeof original) => {
-      (p.settings as any).enabledDeckIds = [42];
-    },
-    (p: typeof original) => {
-      (p.settings as any).enabledCardTypes = "concept";
-    },
-  ]) {
-    const bad = structuredClone(original);
-    mutate(bad);
-    await expect(importData(bad, Date.now())).rejects.toThrow(/Malformed backup/);
-    expect((await buildExport()).settings).toEqual(original.settings);
-  }
+  const bad = structuredClone(original);
+  mutate(bad);
+  await expect(importData(bad, Date.now())).rejects.toThrow(message);
+  const after = await buildExport();
+  expect(after.reviewStates).toEqual(original.reviewStates);
+  expect(after.reviewLogs).toEqual(original.reviewLogs);
+  expect(after.settings).toEqual(original.settings);
+  expect(after.meta).toEqual(original.meta);
 });
 ```
 
-## Existing implementation
+Adding the `reviewLogs` comparison closes the second gap noted in chapter 3. `toThrow(string)` matches a substring; for an exact match use `rejects.toThrow(new RegExp(\`^${message}$\`))`, or catch the error and compare `.message`.
 
-A complete import validator runs before the replacement transaction. It checks state/log/settings/meta values and unique card IDs; unknown-card states and logs are omitted consistently, missing known states are recreated, and rejected imports preserve progress. The long worked snippet was shortened without changing its behavior.
+## Exercise 2
 
-The key model is: Bundled cards and decks provide learning content. ReviewState tracks cardId, ease, intervalDays, due, status, learningStepIndex, lapses and reps. ReviewLog records a grade/time. Settings and Meta hold study limits and streaks. Dexie wraps IndexedDB transactions.
+```ts
+it('accepts unknown deck ids (no reference check yet)', async () => {
+  const backup = await buildExport();
+  backup.settings.enabledDeckIds = ['no-such-deck'];
+  await importData(backup, Date.now());
+  expect((await buildExport()).settings.enabledDeckIds).toEqual(['no-such-deck']);
+});
 
-The worked fixture should behave as follows: Export fresh progress, set one card reps to 7 and restore only that state: the card keeps 7 reps and missing cards receive new states. Include one unknown-card log: it is omitted. A negative due value, duplicate state ID, invalid study limit or impossible metadata date rejects before any stored progress changes.
+it('accepts ease below the scheduler floor (validator range is 1-10)', async () => {
+  const backup = await buildExport();
+  backup.reviewStates[0].ease = 1.0;
+  await importData(backup, Date.now());
+  expect((await db.reviewStates.get(backup.reviewStates[0].cardId))?.ease).toBe(1);
+});
+```
 
-## Extension solutions
+## Exercise 3 (filter policy)
 
-### Exercise 1
+```ts
+// in importData, before the transaction
+const knownDecks = new Set(allDecks.map((d) => d.id));
+const settings = {
+  ...payload.settings,
+  enabledDeckIds: payload.settings.enabledDeckIds.filter((id) => knownDecks.has(id)),
+};
+// inside the transaction
+await db.settings.put({ id: "settings", ...settings });
+```
 
-**Prompt:** Preview how many states will be restored, ignored and recreated.
+`allDecks` is already exported from `./content`; add it to the existing import. Review points: the caller's payload is not mutated; the policy matches the card policy; the commit message says *why* filtering beats rejecting (backups from older builds should still restore).
 
-**Approach:** Validate first, compare IDs with the bundled content and show all three counts without writing.
+## Exercise 4
 
-**Review:** the preview must call `validateImport` first and compute the three counts (restored = states whose card exists, ignored = logs for unknown cards, recreated = bundled cards with no state) without opening a transaction; a test asserts the counts for a fixture with one unknown card and that `importData` was not called.
+```ts
+export function previewImport(payload: unknown) {
+  validateImport(payload);
+  const knownIds = new Set(allCards.map((c) => c.id));
+  const restoredIds = new Set(payload.reviewStates.filter((s) => knownIds.has(s.cardId)).map((s) => s.cardId));
+  return {
+    restored: restoredIds.size,
+    ignoredStates: payload.reviewStates.length - restoredIds.size,
+    ignoredLogs: payload.reviewLogs.filter((l) => !knownIds.has(l.cardId)).length,
+    recreated: allCards.filter((c) => !restoredIds.has(c.id)).length,
+  };
+}
+```
 
-### Exercise 2
+Because `validateImport` is an assertion function, `payload` is typed as `ExportData` after the first line, with no cast. Review points: no `db.` call anywhere in the function; the counts use the same filter as `importData`, ideally by extracting one shared helper so the preview cannot drift from the real import.
 
-**Prompt:** Explain one scheduler field with an before/after grade example.
+## Exercise 5
 
-**Approach:** Pick an existing schedule test and trace due/status/intervalDays for Again versus Good using a fixed clock.
+```ts
+importBackup: async file => {
+  const text = await file.text();
+  let payload: ExportData;
+  try {
+    payload = JSON.parse(text) as ExportData;
+  } catch {
+    throw new Error('That file is not a DevDeck backup (not valid JSON).');
+  }
+  const restored = await importData(payload, Date.now());
+  // ...unchanged
+},
+```
 
-**Review:** the explanation must trace one scheduler field (`intervalDays`, `due` or `status`) through an existing test with a fixed clock, showing the before and after values for `Again` versus `Good`; it must reference the actual function in `src/scheduler.ts` and match the numbers the test asserts.
+The cast is still there, but now it sits directly before a call that validates. Review point: the `try` wraps only the parse, so validator errors keep their own messages.
 
-### Exercise 3
+## Exercise 6
 
-**Prompt:** Force an IndexedDB insert failure after clear and verify rollback.
+```ts
+it('a failure after clear() rolls back every progress table', async () => {
+  const card = (await buildExport()).reviewStates[0];
+  await saveReview({ ...card, reps: 1 }, { cardId: card.cardId, reviewedAt: Date.now(), grade: 2, msTaken: 100, statusBefore: 'new' });
+  const before = await buildExport();
 
-**Approach:** Use a transaction hook or invalid storage operation in an isolated database and compare all affected tables with the original export.
+  const spy = vi.spyOn(db.reviewLogs, 'bulkAdd').mockRejectedValueOnce(new Error('disk full'));
+  try {
+    await expect(importData(structuredClone(before), Date.now())).rejects.toThrow('disk full');
+  } finally {
+    spy.mockRestore();
+  }
 
-**Review:** use a `Dexie` hook or an invalid operation inside `importData`'s callback to throw after the clear, then compare every affected table with the original export; the test must show the old rows are still there, and you must name the Dexie mechanism (transaction abort) that made it so.
+  const after = await buildExport();
+  expect(after.reviewStates).toEqual(before.reviewStates);
+  expect(after.reviewLogs).toEqual(before.reviewLogs);
+  expect(after.settings).toEqual(before.settings);
+  expect(after.meta).toEqual(before.meta);
+});
+```
 
-### Exercise 4
+Add `vi` and `saveReview` to the test file's imports. The reason it passes: Dexie aborts a transaction whose callback rejects, and IndexedDB then discards every change made inside it, including `clear()`. The "move `bulkAdd` outside the transaction" experiment is what proves the test can fail.
 
-**Prompt:** Add editable learner-created cards with stable identity.
+## Exercise 7
 
-**Approach:** Separate bundled content from learner-owned content, avoid overwriting custom cards in seedAndLoad and define how exports include card definitions and progress references.
+One workable design: store `knownDeckIds` next to the settings (or in `meta`). In `seedAndLoad`, for every deck in `allDecks` that is not in `knownDeckIds`, add it to `enabledDeckIds` and to `knownDeckIds`. A user who disables a deck removes it from `enabledDeckIds` but not from `knownDeckIds`, so it stays off. Review points: the backup format changes, so either bump `SCHEMA_VERSION` with a migration or make the new field optional and derive it on import; and say what happens when a v1 backup without the field is restored.
 
-**Review:** the design must separate bundled cards from learner-created cards (a `source` field or a separate table), keep `seedAndLoad` from overwriting custom cards, give custom cards a stable id that survives export and import, and state how progress references a card that was later edited.
+## Exercise 8
 
-## Review questions with answer guidance
+A strong note separates bundled cards (immutable, id-stable, shipped with the app) from learner cards (a new table, ids generated once with `crypto.randomUUID()` and never changed), adds a `cards` array to `ExportData` under `SCHEMA_VERSION = 2` with a `migrate` step for version 1 files, and changes the unknown-card filter in `importData` to "known = bundled ∪ cards in this backup".
 
-**Why not trust input just because it came from this UI?** A caller can bypass the UI, a saved file can be edited, and older data can have a different shape. Validate at the boundary that owns the operation.
+## Things a senior reviewer would flag in the current code
 
-**Why keep the id stable?** It identifies the same domain record across views and edits. Changing it can create duplicates, disconnect child records or make reconciliation impossible.
+Verified observations, not changes made by this course.
 
-**What makes the failure test meaningful?** It observes the promised state invariant. For this project, explain exactly why the failing scenario in [src/importValidation.test.ts](../src/importValidation.test.ts) would detect the original or a plausible regression.
+1. **Writes after grading are fire-and-forget with errors swallowed.** `gradeCurrent` calls `void saveReview(...).catch(() => undefined)` (`src/store.ts:177-183`) and `void putMeta(meta).catch(() => undefined)` a few lines later. If IndexedDB rejects (quota, private mode), the UI shows the card as graded and nothing tells the user it was not saved. The transaction inside `saveReview` keeps the two writes consistent with each other; it cannot make the user aware they both failed.
+2. **Error messages name a block, not a record.** "Malformed backup: review log" for a 5,000-log file sends the user hunting.
+3. **Validator ranges are not derived from the scheduler** (ease 1-10 vs a 1.3 floor and no ceiling; `newCardsPerDay` 0-10,000 vs a 1-50 stepper). Chapter 2, section 6.
+4. **New decks start disabled for existing users** (exercise 7), and unknown deck ids survive import (exercise 3).
+5. **No confirmation before a destructive import.** Reset asks twice (`Settings.tsx:47-52`); import, which also replaces all progress, asks nothing.
+6. **The raw `JSON.parse` error reaches the user** (exercise 5).
 
-**What does the test not prove?** A bounded suite does not prove all concurrency, browsers, deployment configurations or unrelated domain behavior. Name the real limitation from this lesson instead of adding a generic disclaimer.
+## Review questions
 
-**When should you extract a helper?** When it isolates a coherent responsibility, makes an invariant clearer or enables a meaningful test without duplicating application logic. A pure validator and a shared persistence boundary are common examples, but do not abstract solely to increase the number of files.
+**Why call `validateImport` inside `importData` rather than in the store?** So every path into the database is validated, including tests and any future caller.
 
-## A sample change explanation
+**Why filter unknown cards instead of rejecting the file?** Card sets change between builds; rejecting would make every older backup unusable after any content change.
 
-“The previous behavior was: Import validation checked only a few outer fields; malformed scheduler values/settings or duplicate card IDs could enter a restore. Unknown-card logs were retained. One existing learning snippet exceeded its tested mobile length limit. I changed the implementation so that: A complete import validator runs before the replacement transaction. It checks state/log/settings/meta values and unique card IDs; unknown-card states and logs are omitted consistently, missing known states are recreated, and rejected imports preserve progress. The long worked snippet was shortened without changing its behavior. The strongest evidence is the regression that exercises the worked fixture and checks authoritative state. A remaining design question is the final stretch exercise.”
-
-Replace that explanation with your own words and actual test results. A strong junior engineer can connect a concrete user problem to code, verification and a clearly stated limit. Completing that explanation independently is the final checkpoint for this course.
+**What does the suite not prove?** That a failure inside the transaction rolls back (until exercise 6), that the store's non-JSON path behaves, and anything about real browsers' IndexedDB quotas. Name these in a PR instead of writing "not production ready".

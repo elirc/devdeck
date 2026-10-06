@@ -1,60 +1,79 @@
-# Concepts explained from first principles
+# Concepts, explained through this code
 
 [Course index](README.md)
 
-## The central idea: validating persisted state and atomic IndexedDB replacement
+## 1. A cast is not a check
 
-A backup is not trusted merely because it has the right version. A negative due time, impossible grade or duplicate card state can corrupt scheduling even if IndexedDB accepts the value. validateImport checks the full structure before importData opens its write transaction. The transaction then clears old progress and inserts the validated replacement, so an insertion failure rolls back the clear.
+`importBackup` does `const payload = JSON.parse(text) as ExportData;` (`src/store.ts:294`). TypeScript types are erased at compile time, so that line produces exactly the same JavaScript as `JSON.parse(text)`. Whatever is in the file is now typed as `ExportData`, and the compiler will happily let you read `payload.reviewStates[0].ease` from a file that has no `reviewStates`.
 
-Content evolves independently of progress. The chosen policy ignores states and logs for card IDs no longer bundled, and creates new states for known cards absent from the backup. This preserves useful progress while avoiding orphan logs. The returned count means known states restored, not total cards after missing-state recreation.
+`validateImport` is the runtime version of the `ExportData` type. Its signature is worth reading closely (`src/importValidation.ts:3-5`):
 
-The test uses fake-indexeddb to exercise the actual Dexie methods and compares stored state/settings/meta after rejected imports. Chromium is a separate check of actual browser startup and interaction. The existing content QA tests also protect the learning experience: a 15-line nested-conditional example was shortened to fit the existing 12-line rule while retaining the same four input outcomes. This app is a browser persistence study case; it does not contain a server CRUD API.
+```ts
+export function validateImport(payload: unknown): asserts payload is ExportData
+```
 
-## Invariants: a precise way to describe correctness
+It takes `unknown`, so inside it every property must be checked before use. And it is an **assertion function**: it either throws or returns normally, and after a normal return TypeScript treats `payload` as `ExportData`. That is a stronger contract than returning `true`/`false`: a caller cannot forget to look at the result, because a bad payload never gets past the call.
 
-An invariant is a rule that must remain true before and after an operation. “The app works” is too broad to test. “A failed import writes no records” or “editing preserves the record id” gives you something observable. For this project, derive your invariants from this behavior:
+## 2. Small predicates, one per shape
 
-> A complete import validator runs before the replacement transaction. It checks state/log/settings/meta values and unique card IDs; unknown-card states and logs are omitted consistently, missing known states are recreated, and rejected imports preserve progress. The long worked snippet was shortened without changing its behavior.
+Lines 6-23 define the vocabulary the rest of the function uses:
 
-Turn each sentence into a small state table. The columns are initial state, input, expected final state and expected feedback. Include one rejected input and one retry/repeated action where relevant. A useful invariant should be meaningful even if the implementation changes from an array to a database or from one UI component to another.
-
-## Validation versus normalization
-
-Validation rejects values the operation cannot accept. Normalization converts acceptable values to the representation the rest of the program expects. Trimming a comparison string is normalization; rejecting an empty required field is validation. Neither operation should silently invent facts. If a quantity is free-form text, do not guess a numerical interpretation. If an imported record is malformed, do not quietly save only the convenient subset unless that is the explicit product policy.
-
-Apply this distinction to the data model:
-
-Bundled cards and decks provide learning content. ReviewState tracks cardId, ease, intervalDays, due, status, learningStepIndex, lapses and reps. ReviewLog records a grade/time. Settings and Meta hold study limits and streaks. Dexie wraps IndexedDB transactions.
-
-Which fields can be omitted? Which can be empty? Which have a bounded vocabulary? Which have stable identity? Write those answers down before adding another conditional. A schema is simply an explicit description of that expected shape and meaning.
-
-## State transitions and failure boundaries
-
-Every change has an ordering. If memory changes first and persistence fails, the UI can show data that will disappear after reload. If persistence succeeds first and rendering fails, the stored data may be correct while the screen is stale. There is no universal answer for every feature, but the choice must be deliberate and observable. The worked change makes one specific promise; the tests check that promise.
-
-A promise represents an operation that completes later. `await` does not make it infallible or atomic; it gives the caller a place to handle success and rejection. Similarly, calling several functions inside one `try` block does not create a database transaction. Atomicity must come from a storage operation or transaction boundary that actually provides it.
-
-## Identity, representation and derived values
-
-Keep a stable id when updating an existing record. Compute display-only values from authoritative data when feasible, so there are fewer independently mutable facts to keep synchronized. Be careful when converting between strings and numbers: `Number('')` is zero, JSON cannot faithfully represent Infinity, and a date string can have different semantics from a timestamp. The specific conversions in this lesson are visible in the worked source, so step through them with a concrete value.
-
-## Small design decisions deserve explanations
-
-Before extracting a new abstraction, explain what repeated responsibility it would own. A helper that merely renames one expression may add little. A pure validator or one transaction boundary can make an important guarantee easier to test. Prefer an explanation tied to this project’s behavior over a rule such as “all code must use a particular pattern.”
-
-Write a short decision note: “We chose X because it preserves Y under Z. It does not yet solve W.” Use the limitations in the worked example to fill in those letters. This is the beginning of engineering judgment: choosing a bounded solution and accurately describing its limits.
-
-## What this maps to on a server
-
-Everything in this course happens in the browser, but each idea has a one-to-one server equivalent that you will meet in the Express and .NET courses:
-
-| here (DevDeck) | on a server |
+| Helper | Accepts |
 |---|---|
-| `validateImport` returning a message before any write | Zod (`validateBody`) or `parseItem` at the Express boundary, answering 400 before the handler |
-| `db.transaction("rw", [...tables], fn)` in `src/db.ts` | `BEGIN ... COMMIT` / `ROLLBACK` around several statements (`withTransaction`, Knex `db.transaction`) |
-| clearing progress then re-inserting inside one transaction | `DELETE` + `INSERT` in one transaction so a failure leaves the old rows |
-| reading `states` after the import to render | re-fetching after a mutation instead of trusting the response |
-| the missing piece: nobody else can write while you import | `SELECT ... FOR UPDATE` or a row lock, which IndexedDB gives you implicitly per transaction |
+| `object` | non-null, non-array object |
+| `text` | non-empty string, at most 200 characters (ids and deck ids) |
+| `number(v, min, max)` | finite number in a range |
+| `integer(v, min, max)` | `number` that is also a whole number |
+| `day` | `null`, or a real calendar date `YYYY-MM-DD` |
+| `fail(field)` | throws `Malformed backup: <field>` |
 
-Treat this course as *runtime validation + client-side transactions*; the exercises transfer directly, the storage API does not.
+`day` does more than a regex. `Date.parse('2025-02-30')` is a valid timestamp in V8 (it rolls over into March), so the helper formats the parsed date back and requires it to equal the input (line 19). `2025-03-02` is not `2025-02-30`, so the value is rejected. This is exactly the case the first test feeds it.
 
+## 3. What each block guarantees
+
+| Lines | Block | Guarantees | Message |
+|---|---|---|---|
+| 24-25 | schema | payload is an object and `schemaVersion === SCHEMA_VERSION` (1) | `unsupported schema version` |
+| 27-34 | arrays | `exportedAt` is a number; states and logs are arrays below size caps (100,000 / 1,000,000) | `review arrays` |
+| 36-51 | states | each state is an object with a valid `cardId`, `ease` in 1-10, non-negative `intervalDays` and `due`, a known `status`, integer counters, and **no `cardId` appears twice** (the `ids` set, line 40) | `review state` |
+| 52-61 | logs | each log has a `cardId`, a timestamp, an integer `grade` 0-3, non-negative `msTaken`, a known `statusBefore` | `review log` |
+| 62-73 | settings | integer limits in range, theme `light`/`dark`, card types from `ALL_CARD_TYPES`, deck ids as strings | `settings` |
+| 74-86 | meta | `id === 'meta'`, matching schema version, valid days, integer streaks with `bestStreak >= streak` | `progress metadata` |
+
+Two design choices to notice. The function stops at the **first** problem and names only the block, not the record, so a user with 2,000 logs learns that one is bad but not which one. And the size caps are there to stop a huge file from freezing the tab, not because a real user has a million reviews.
+
+## 4. Validate first, then transact
+
+`importData` (`src/db.ts:166-201`) runs in two phases:
+
+1. **Validate outside the transaction** (line 170). A malformed file is rejected before IndexedDB is touched at all. Nothing to roll back.
+2. **Replace inside one transaction** (lines 174-199). The callback clears and refills four tables. Dexie runs it as one IndexedDB `readwrite` transaction over exactly those tables; if any operation fails, or the callback throws or returns a rejected promise, Dexie aborts it and IndexedDB restores all four tables to their state before the transaction.
+
+Why both? Validation catches bad **data**. The transaction catches failures that have nothing to do with the data: a storage quota error, a bug in the callback, the tab being closed mid-write. Validation alone would leave you exposed to the second kind; the transaction alone would let well-formed garbage in.
+
+Compare `saveReview` (`db.ts:118-126`): the same idea at a smaller scale. A graded review writes a new state and appends a log in one transaction, so stats can never show a review whose state change was lost.
+
+## 5. Unknown cards: filter, don't fail
+
+Cards are bundled with the app, and a later build might remove or rename one. A backup from an older build can therefore contain states and logs for card ids this build does not have. `importData` handles this by **filtering**, not rejecting (lines 171-172 for states, 187-188 for logs), and then creating fresh states for bundled cards the backup did not mention (181-184). The test `valid restore keeps progress, omits unknown-card logs, and recreates missing states` pins all three behaviours.
+
+Note the asymmetry: unknown **card** ids are dropped, but unknown **deck** ids in `settings.enabledDeckIds` are kept as they are. The validator only checks that they are strings (line 71). Nothing breaks: `getPerDeckCounts` creates an empty counter for each enabled id (`src/queue.ts:174-176`), and no card matches it. Whether to drop them too is exercise 3.
+
+## 6. Ranges: the validator and the app do not quite agree
+
+A validator encodes beliefs about what the app produces. Here are places where those beliefs and the app's actual behaviour differ, each confirmed by running `validateImport` directly:
+
+- `ease`: the validator allows 1-10. The scheduler never goes below 1.3 (`MIN_EASE`, `scheduler.ts:11`), so `ease: 1.0` is accepted although the app cannot produce it. In the other direction, "Easy" adds 0.15 with no upper clamp (`scheduler.ts:167`), so in principle a card graded Easy 51 times in a row would reach 10.15 and its backup would be rejected with `review state`. In practice it is unreachable: each Easy on a review card multiplies the interval, which is capped at 365 days, so that would take decades. It is still a good example of a validator rule that nobody derived from the producer.
+- `newCardsPerDay`: the validator allows 0-10,000; the Settings stepper clamps to 1-50 (`Settings.tsx:15-18`).
+- `enabledCardTypes: []` is accepted; the Settings screen refuses to disable the last type (`Settings.tsx:20-28`).
+- `meta.streak: 5` with `lastReviewDay: null` is accepted, although the app only increments a streak on a review day.
+
+None of these causes a crash. They are worth knowing because they show the difference between "the validator exists" and "the validator matches the domain". Exercise 2 pins two of them.
+
+## 7. Schema versions
+
+`SCHEMA_VERSION` is 1 (`types.ts:126`), and the validator rejects any other value, older or newer. There is no migration path yet, so this is the honest choice: a version-0 file has an unknown shape. When the format changes, the pattern is a `migrate(payload)` step that upgrades one version at a time and then calls the current validator. Note that this is separate from Dexie's own `this.version(1).stores(...)` (`db.ts:29`), which versions the IndexedDB schema, not the backup file.
+
+## 8. Decision note
+
+Practise writing the sentence engineers use in design reviews: "We chose X because it preserves Y under Z. It does not yet solve W." For this code: "We validate the whole backup before opening a transaction, and replace all four progress tables in one Dexie transaction, because that guarantees a bad file changes nothing and a failed write leaves the previous progress intact. It does not tell the user which record was wrong, and it does not check that settings refer to decks that exist."

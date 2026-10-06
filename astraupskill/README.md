@@ -1,69 +1,54 @@
 # DevDeck: safe progress restore
 
-This is a hands-on course for a junior software engineer using the actual project in `devdeck`. The central skill is **validating persisted state and atomic IndexedDB replacement**. The implementation is already present: use it as a worked example, then recreate a small variation independently.
+DevDeck is an offline spaced-repetition PWA (React 19, Vite 8, Zustand, Dexie over IndexedDB) with 265 bundled flashcards across 11 decks for learning JS/TS, web fundamentals, React and tooling. This course uses one real feature as its worked example: **restoring progress from a JSON backup**. You will learn how the app refuses a malformed backup before touching any stored data, how it applies a valid one inside a single IndexedDB transaction, and where the validator still accepts data the app itself would never produce.
 
 ## What you will be able to do
 
-- Explain the purpose of the changed code and the data it owns.
-- Trace an action from input through validation, state/persistence and output.
-- Predict a success case and a failure case before running either.
-- Read the regression tests and explain what each assertion proves.
-- Implement a related change without copying the worked answer.
-- Explain a limitation and a reasonable next step without overstating readiness.
+- Trace a backup file from the Settings screen to the four Dexie tables it replaces.
+- Explain why `JSON.parse(text) as ExportData` checks nothing, and what `validateImport` checks instead.
+- Explain why the import is all-or-nothing, and which line makes it so.
+- Predict which validator message a malformed backup produces.
+- Write tests against the real Dexie code using `fake-indexeddb`, including one that forces a failure halfway through the transaction.
 
 ## Prerequisites
 
-Be comfortable with variables, arrays, objects, functions, conditionals and calling a function. For React projects, review props, state and event handlers. For API projects, review JSON, HTTP methods and promises, then learn the relevant SQL operations as you trace the request. You do not need to memorize the whole repository first.
+TypeScript (union types, `unknown`, type guards), `async`/`await`, and React state basics. No prior Dexie or IndexedDB knowledge is assumed; chapter 2 covers what you need.
 
 ## Start the project
 
-From this project root, install its declared dependencies:
-
 ```powershell
 npm install
-npm run dev
-```
-
-Open the local Vite URL. This app stores its data in the browser, so no API process or PostgreSQL service is required. Keep using the same origin: changing the hostname or port selects a different browser storage area.
-
-```powershell
-npm test
+npm run dev        # Vite prints the local URL
+npm test           # vitest run: 4 test files, no browser needed (fake-indexeddb)
+npm run typecheck  # tsc -b; the 265 cards are typed, so this checks content too
 npm run build
 ```
 
-The existing Vitest suite runs alongside the new import regressions. Use synthetic records and a separate browser profile for practice resets. The test fixtures use fresh simulated storage. A browser check separately verifies the built app in Chromium. Export a copy of learning progress before experimenting with restore behavior.
+All data lives in IndexedDB under the page's origin, so a different host or port starts empty. Grade a few cards, then **Settings → Export backup** to get a real file to experiment with.
 
-The commands are run from this project’s folder, not from the Desktop inventory repository. Existing README/Fable material remains available. This folder teaches the implemented change and points to executable source and tests rather than replacing older guides.
+`package.json` declares `"typescript": "~6.0.2"`, Vite 8 and Vitest 4; the lockfile is committed, so `npm install` reproduces them. The course was verified on Node 22.
 
-### Toolchain
+## Reading order
 
-This course was delivered and verified on **Node 22.16.0**, **npm 10**. Use the same major versions: newer patch releases are fine, older majors are untested here.
+1. [Codebase map and the import trace](01-CODEBASE-MAP.md)
+2. [Concepts, explained through this code](02-CONCEPTS.md)
+3. [The worked change: `validateImport` and `importData`](03-WORKED-CHANGE.md)
+4. [Tests, gaps and debugging](04-TESTING-AND-DEBUGGING.md)
+5. [Exercises, easy to hard](05-PRACTICE.md)
+6. [Solutions and reviewer notes](06-SOLUTIONS-AND-REVIEW.md)
+7. [Trace lab](07-TRACE-LAB.md)
+8. [Verification record and limits](VERIFICATION.md)
 
-`npm test` runs `vitest run`, which finds its own test files, so there is no shell glob to worry about on Windows.
+The repository also has [TESTING.md](../TESTING.md) (what every test file covers, plus a manual QA checklist) and [HANDOFF.md](../HANDOFF.md) (the original build plan, now historical).
 
-**Learning-path label:** runtime validation + client-side transactions (an elective; the same shapes appear on the server in the Express and .NET courses, see chapter 2).
+## Your first session (about 90 minutes)
 
-## Reading and practice order
-
-1. [Codebase map and reading order](01-CODEBASE-MAP.md)
-2. [Concepts explained from first principles](02-CONCEPTS.md)
-3. [Worked implementation and examples](03-WORKED-CHANGE.md)
-4. [Tests, failure cases and debugging](04-TESTING-AND-DEBUGGING.md)
-5. [Guided and independent exercises](05-PRACTICE.md)
-6. [Solutions, tradeoffs and review rubric](06-SOLUTIONS-AND-REVIEW.md)
-7. [Detailed trace lab and independent checkpoint](07-TRACE-LAB.md)
-8. [Actual verification results and limits](VERIFICATION.md)
-
-## Your first session
-
-1. Open the app or its tests and reproduce one normal workflow.
-2. Read chapter 1 while keeping [src/db.ts](../src/db.ts) open.
-3. Write a prediction for the worked example in chapter 3 before executing it.
-4. Run the focused test suite and explain one assertion aloud.
-5. Complete the first practice exercise, then check the solution discussion.
-
-Keep a short learning log with four fields: prediction, observed result, explanation and next question. A mismatch is useful evidence: find the exact layer where your mental model diverged from the program. Use a disposable browser profile or local test database for failure experiments so your own records are not part of the fixture.
+1. Run the app, grade five cards, export a backup and open the JSON. Find one `reviewStates` entry and the `meta` block.
+2. Read chapter 1 with [src/importValidation.ts](../src/importValidation.ts) and [src/db.ts](../src/db.ts) open side by side.
+3. Change one state's `due` to `-1` in your file and import it. Read the message, then confirm your progress is unchanged.
+4. Run `npx vitest run src/importValidation.test.ts` and find the test that covers what you just did.
+5. Do exercise 1 in chapter 5.
 
 ## Scope
 
-A complete import validator runs before the replacement transaction. It checks state/log/settings/meta values and unique card IDs; unknown-card states and logs are omitted consistently, missing known states are recreated, and rejected imports preserve progress. The long worked snippet was shortened without changing its behavior. This is one bounded improvement, not certification of every feature. Read VERIFICATION.md for checks actually executed. Exercises are intentionally future practice; do not confuse them with completed implementation.
+The course covers backup import (`importBackup` → `validateImport` → `importData`). The scheduler, queue and screens appear only where they explain an import decision. Exercises are learner work; none of them is implemented in the repository.

@@ -1,5 +1,7 @@
 # DevDeck — Handoff to Next Model
 
+> **Status note (2026-10-06): this handoff is historical.** Every item under "NOT DONE" below has since been completed: `src/components/CardView.tsx`, all five screens in `src/screens/`, `App.tsx`, `main.tsx` (with `registerSW`), a hand-written `index.css` with `.theme-light` overrides, the content library and the README all exist, and the verify step's commands (`npm test`, `npm run typecheck`, `npm run build`) are the project's normal checks. The content grew beyond the plan in item 10: 265 cards across **11** decks (debugging, code quality, DSA patterns, security and CSS were added), enforced by the `ships 265 cards across 11 decks` test. Since this file was written, backup import also gained full validation (`src/importValidation.ts`). The `devdeck-spec.md` mentioned below is not in the repository, and "Desktop/devdeck" refers to the original author's machine; use the repository root. Read the rest as a record of how the build was planned, not as a to-do list. For the current state, see [README.md](README.md), [TESTING.md](TESTING.md) and the [course](astraupskill/README.md).
+
 Read `devdeck-spec.md`-style requirements below, then finish the build. The project lives in this folder (`Desktop/devdeck`). Full product spec: see **§Spec summary** at the bottom; original detailed spec was delivered in chat but this file is self-sufficient.
 
 ## Current status

@@ -24,7 +24,7 @@ npm run dev        # dev server at http://localhost:5173
 Other commands:
 
 ```bash
-npm test           # unit tests for the SM-2 scheduler and session queue
+npm test           # scheduler, queue, Dexie/store integration, content QA and backup-import tests
 npm run typecheck  # tsc
 npm run build      # production build in dist/ (includes the service worker)
 npm run preview    # serve the production build locally

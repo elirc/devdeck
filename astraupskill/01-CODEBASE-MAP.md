@@ -1,87 +1,73 @@
-# Codebase map and reading order
+# Codebase map and the import trace
 
 [Course index](README.md)
 
-## The problem this project solves
+## The problem this course is about
 
-Import validation checked only a few outer fields; malformed scheduler values/settings or duplicate card IDs could enter a restore. Unknown-card logs were retained. One existing learning snippet exceeded its tested mobile length limit. The improvement you will study is: A complete import validator runs before the replacement transaction. It checks state/log/settings/meta values and unique card IDs; unknown-card states and logs are omitted consistently, missing known states are recreated, and rejected imports preserve progress. The long worked snippet was shortened without changing its behavior.
+A backup is a JSON file a user can edit, truncate, or carry over from an older build. An earlier version of the import checked only a few outer fields, so out-of-range scheduler values, malformed settings or duplicate card ids could be restored, and logs for cards that no longer exist were kept. Now `importData` calls `validateImport`, which checks every state, log, setting and metadata field before the replacement transaction opens.
 
-## Data model
+## How the repository is laid out
 
-Bundled cards and decks provide learning content. ReviewState tracks cardId, ease, intervalDays, due, status, learningStepIndex, lapses and reps. ReviewLog records a grade/time. Settings and Meta hold study limits and streaks. Dexie wraps IndexedDB transactions.
+| Path | What lives there | Read for this course? |
+|---|---|---|
+| `src/types.ts` | `Card`, `ReviewState`, `ReviewLog`, `Settings`, `Meta`, `ExportData`, `SCHEMA_VERSION`, `ALL_CARD_TYPES` | Yes, first |
+| `src/db.ts` | Dexie schema, seeding, `saveReview`, `buildExport`, `importData`, `resetProgress` | Yes |
+| `src/importValidation.ts` | `validateImport`, the runtime check for a backup | Yes |
+| `src/store.ts` | Zustand store: sessions, grading, streaks, `exportBackup`, `importBackup` | Only `importBackup` |
+| `src/scheduler.ts`, `src/queue.ts` | Pure SM-2 scheduling and session-queue building | Only to understand field ranges |
+| `src/screens/Settings.tsx` | Export, import, reset, study limits | Yes, the import handler |
+| `src/content/*.ts` | 265 cards in 11 deck files, assembled in `content/index.ts` | No |
+| `src/*.test.ts` | Four Vitest files, run in Node with `fake-indexeddb` | Yes |
 
-An object is a named collection of fields. An array is an ordered collection of values. An id answers “which record?”; an index answers “where is it in this array right now?” Those questions are different whenever the list can be filtered, reordered or edited. Persisted data is the form that must survive a process/page restart. Derived data can be recomputed from that persisted state.
+## The data a backup contains
 
-## Trace one action
+`ExportData` (`src/types.ts:117-124`) has six fields: `schemaVersion`, `exportedAt` (milliseconds), `reviewStates`, `reviewLogs`, `settings` and `meta`. It does **not** contain cards or decks; those ship with the app. So a backup is "progress against cards this build knows about", and an import has to decide what to do with progress for cards that no longer exist.
 
-1. The Settings UI reads an uploaded JSON backup.
-2. JSON parsing yields unknown runtime values.
-3. The import validator checks nested records, identity and numeric/date constraints.
-4. A valid result reaches the existing replacement operation.
-5. The storage layer writes the accepted candidate according to its documented boundary.
-6. The UI reloads or renders the saved result and reports rejected input.
+- `ReviewState` (`types.ts:68-77`): one per card, keyed by `cardId`. `ease`, `intervalDays`, `due` (ms timestamp), `status` (`new | learning | review | relearning`), `learningStepIndex`, `lapses`, `reps`.
+- `ReviewLog` (`types.ts:79-86`): one per graded review. `id` is an auto-increment key Dexie assigns.
+- `Settings` (`types.ts:88-94`): `newCardsPerDay`, `maxReviewsPerDay`, enabled card types and deck ids, theme.
+- `Meta` (`types.ts:96-107`): streaks, the last review day, and the "new cards introduced today" counter. Days are local `YYYY-MM-DD` strings.
+
+## Where it is stored
+
+[src/db.ts](../src/db.ts) lines 19-38 define one IndexedDB database, `devdeck`, with six tables: `cards`, `decks`, `reviewStates` (primary key `cardId`), `reviewLogs` (`++id`), `settings` and `meta` (one row each, keyed `'settings'` and `'meta'`). Unlike `localStorage`, IndexedDB has transactions that can span several tables. That is the property the import relies on.
+
+## Trace one import, file by file
+
+1. **The file input.** `Settings.tsx:128-137`: a hidden `<input type="file" accept="application/json">`. `onChange` calls `onImportFile(file)` and clears `e.target.value` so the same file can be picked twice.
+2. **Hand-off to the store.** `onImportFile` (`Settings.tsx:38-45`) calls `importBackup(file)` and shows either the returned message or the thrown error's `message`.
+3. **Parse.** `importBackup` (`src/store.ts:292-301`) reads `file.text()` and does `JSON.parse(text) as ExportData` (line 294). The cast checks nothing; a non-JSON file throws a `SyntaxError` here, and its raw message is what the user sees.
+4. **Validate.** `importData` (`src/db.ts:166`) first calls `validateImport(payload)` (line 170). That function throws `Error('Malformed backup: <part>')` at the first problem. No transaction has started yet.
+5. **Filter.** Lines 171-172 keep only states whose `cardId` is a card in this build.
+6. **Replace, atomically.** Lines 174-199: one `db.transaction("rw", [reviewStates, reviewLogs, settings, meta], ...)`. Inside it: clear states, add the kept states, create fresh states for any bundled card the backup did not cover, clear logs, add the logs for known cards (without their old `id`), overwrite settings and meta. If anything inside throws, Dexie aborts the transaction and IndexedDB rolls back every table it touched, including the `clear()`.
+7. **Republish.** Back in `importBackup`, `seedAndLoad` re-reads the database (line 296) and `set({ states, settings, meta })` (line 299) updates React. The UI shows what was committed, not the parsed file.
+8. **Report.** The message is `Restored progress for N cards.`, where `N` is `importData`'s return value: the number of states kept after filtering.
 
 ```mermaid
 flowchart LR
-    A[Input or user action] --> B[Validate and normalize]
-    B --> C[Compute intended change]
-    C --> D[Commit at the state boundary]
-    D --> E[Return or render observed state]
-    B --> F[Explain invalid input]
-    D --> G[Handle a failed write]
+    F[file input<br/>Settings.tsx:128] --> S[importBackup<br/>store.ts:292]
+    S -->|JSON.parse| I[importData<br/>db.ts:166]
+    I --> V[validateImport<br/>importValidation.ts:3]
+    V -->|throws| E[message shown<br/>Settings.tsx:43]
+    V -->|ok| T[one rw transaction<br/>db.ts:174-199]
+    T -->|commit| R[seedAndLoad + set<br/>store.ts:296-299]
+    T -->|any throw| RB[abort: all four tables unchanged]
 ```
 
-This diagram names responsibilities, not necessarily separate files. A small browser program can keep them in app.js. A larger API spreads them across controllers, services and models. Follow the actual sequence above rather than assuming every repository has the same architecture.
+The export side is `exportBackup` (`store.ts:279-290`) → `buildExport` (`db.ts:140-160`), which reads the four progress tables and adds `schemaVersion` and `exportedAt`.
 
-## Where to read first
+## Reading order
 
-1. [src/db.ts](../src/db.ts): locate `importData` and read its inputs, branches and return/side effects.
-2. [src/importValidation.test.ts](../src/importValidation.test.ts): read the scenario names before the helper code.
-3. The root [README](../README.md): connect setup and the larger application workflow.
-
-## Source navigation
-
-- [src/App.tsx](../src/App.tsx)
-- [src/app.integration.test.ts](../src/app.integration.test.ts)
-- [src/components/CardView.tsx](../src/components/CardView.tsx)
-- [src/components/CodeBlock.tsx](../src/components/CodeBlock.tsx)
-- [src/components/GradeBar.tsx](../src/components/GradeBar.tsx)
-- [src/components/RichText.tsx](../src/components/RichText.tsx)
-- [src/content/code-quality.ts](../src/content/code-quality.ts)
-- [src/content/css-fundamentals.ts](../src/content/css-fundamentals.ts)
-- [src/content/debugging-and-errors.ts](../src/content/debugging-and-errors.ts)
-- [src/content/dsa-patterns.ts](../src/content/dsa-patterns.ts)
-- [src/content/index.ts](../src/content/index.ts)
-- [src/content/js-async.ts](../src/content/js-async.ts)
-- [src/content/js-fundamentals.ts](../src/content/js-fundamentals.ts)
-- [src/content/react-mental-model.ts](../src/content/react-mental-model.ts)
-- [src/content/security-basics.ts](../src/content/security-basics.ts)
-- [src/content/tooling.ts](../src/content/tooling.ts)
-- [src/content/ts-essentials.ts](../src/content/ts-essentials.ts)
-- [src/content/web-and-systems.ts](../src/content/web-and-systems.ts)
-- [src/db.ts](../src/db.ts)
-- [src/importValidation.test.ts](../src/importValidation.test.ts)
-- [src/importValidation.ts](../src/importValidation.ts)
-- [src/main.tsx](../src/main.tsx)
-- [src/queue.test.ts](../src/queue.test.ts)
-- [src/queue.ts](../src/queue.ts)
-- [src/scheduler.test.ts](../src/scheduler.test.ts)
-- [src/scheduler.ts](../src/scheduler.ts)
-- [src/screens/Home.tsx](../src/screens/Home.tsx)
-- [src/screens/Session.tsx](../src/screens/Session.tsx)
-- [src/screens/Settings.tsx](../src/screens/Settings.tsx)
-- [src/screens/Stats.tsx](../src/screens/Stats.tsx)
-- [src/screens/Summary.tsx](../src/screens/Summary.tsx)
-- [src/store.ts](../src/store.ts)
-- [src/types.ts](../src/types.ts)
-- [vite.config.ts](../vite.config.ts)
-
-## A practical reading technique
-
-At each function boundary, write down the value coming in, the value going out and any side effect. A side effect includes a storage write, SQL query, network request, timer registration or DOM update. If a function calls another function, inspect only that next dependency until you can finish the chosen trace. Return to unrelated files later.
-
-For this lesson, start with: **Export fresh progress, set one card reps to 7 and restore only that state: the card keeps 7 reps and missing cards receive new states. Include one unknown-card log: it is omitted. A negative due value, duplicate state ID, invalid study limit or impossible metadata date rejects before any stored progress changes.** Mark where the id, time, amount or other important value changes representation. For example, JSON serializes values into text; a date field may be a calendar string; SQL aggregates may return a different type from individual rows. Representation changes are common bug locations.
+1. `src/types.ts` lines 68-126.
+2. `src/importValidation.ts` (87 lines): the helpers on lines 6-23 first, then each block.
+3. `src/db.ts` lines 140-201: `buildExport` and `importData`.
+4. `src/store.ts` lines 279-301.
+5. `src/importValidation.test.ts` (80 lines), reading the `it(...)` names first.
 
 ## Check your understanding
 
-Without reading the solution, answer: Who owns the mutable state? Which input is untrusted? Which function first decides whether the operation is valid? What survives reload or restart? What observation would prove that the operation partially failed? Point to a source file for each answer, rather than describing a generic app from memory.
+1. Which function first decides that an import is invalid, and how does it signal that: a return value or an exception?
+2. If the backup contains a state for a card that was removed from the app, what happens to it, and to that card's logs?
+3. A backup covers 3 cards. How many review states exist after import, and why?
+4. Which line would you point to as "the reason a failed import cannot half-apply"?
+5. What does the user see for a file that is not JSON at all?

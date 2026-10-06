@@ -17,11 +17,14 @@ No browser or emulator needed: database tests run against `fake-indexeddb`.
 
 ## Test files
 
+Static count (2026-10-06): 63 tests — scheduler 21, queue 9, integration 30, import validation 3.
+
 | File | Kind | Covers |
 |---|---|---|
 | `src/scheduler.test.ts` | Unit | SM-2 math: learning steps, graduation, lapses/relearning, ease floor (1.3), interval formulas per grade, 365-day cap, fuzz, interval previews, immutability |
 | `src/queue.test.ts` | Unit | Session queue: learning-first ordering, due-date sort, 1-new-per-4-reviews interleaving, daily new-card cap, `maxReviewsPerDay`, deck/type filters, end-of-day boundary |
 | `src/app.integration.test.ts` | Integration + content QA | Everything below |
+| `src/importValidation.test.ts` | Integration (Dexie) | Backup restore: malformed states, settings and metadata are rejected with progress unchanged; a partial restore keeps the restored state, recreates missing states and drops logs for unknown cards |
 
 ### What `app.integration.test.ts` covers
 
@@ -39,7 +42,9 @@ interval > 365 d, due in the past).
 **Database (Dexie).** First-launch seeding; re-seeding on later launches never
 clobbering progress; review persistence; the full backup cycle
 (export → reset → import restores states, logs, streaks exactly); imports dropping
-unknown card ids gracefully; schema-version rejection.
+unknown card ids gracefully; schema-version rejection. Field-level validation of a
+backup (ranges, duplicate ids, impossible dates, settings shapes) is tested separately
+in `src/importValidation.test.ts`.
 
 **Store (session flows).** A complete first session through the real Zustand store:
 10 new cards, learning re-entry mid-session, exactly 20 reviews, correct summary,
